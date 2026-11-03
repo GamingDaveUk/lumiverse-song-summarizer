@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "name": "Song & Message Summarizer",
+  "identifier": "song_message_summarizer",
+  "author": "mrgreaper",
+  "github": "https://github.com/mrgreaper/lumiverse-song-summarizer",
+  "homepage": "https://github.com/mrgreaper/lumiverse-song-summarizer",
+  "permissions": [
+    "generation",
+    "chat_mutation",
+    "chats"
+  ],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js"
+}
