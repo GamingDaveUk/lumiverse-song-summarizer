@@ -7,7 +7,14 @@ export function setup(ctx: SpindleFrontendContext) {
   let autoSongEnabled = false
   let currentChatId: string | null = null
 
-  // Clean up any leftover injections from previous extension hot-reloads
+  // Retire any leftover DOM elements from earlier versions
+  for (const stale of Array.from(document.querySelectorAll('.sms-msg-bar'))) {
+    const wrapper = stale.parentElement || stale
+    try {
+      ctx.dom.uninject(wrapper)
+    } catch {}
+    stale.remove()
+  }
   ctx.dom.cleanup()
 
   const removeStyle = ctx.dom.addStyle(`
@@ -48,9 +55,15 @@ export function setup(ctx: SpindleFrontendContext) {
     border-color: var(--lumiverse-accent);
   }
   .sms-msg-bar {
-    display: inline-flex;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
-    margin-top: 6px;
+    width: 100%;
+    flex-basis: 100%;
+    order: 999;
+    margin-top: 8px;
+    padding-top: 4px;
     opacity: 0.75;
     transition: opacity var(--lumiverse-transition-fast);
   }
@@ -161,7 +174,7 @@ export function setup(ctx: SpindleFrontendContext) {
     </button>
 
     <div style="font-size: 11px; color: var(--lumiverse-text-dim); line-height: 1.4;">
-    <strong>Tip:</strong> Click the buttons on any message bubble, or hold <strong>Alt + Right-Click</strong> on any message to open the Summarizer context menu.
+    <strong>Tip:</strong> Click the buttons at the bottom of any message, or hold <strong>Alt + Right-Click</strong> on any message to open the Summarizer context menu.
     </div>
     `
 
@@ -223,53 +236,67 @@ export function setup(ctx: SpindleFrontendContext) {
     void renderDrawer()
   })
 
-  // Track injected wrappers by messageId AND verify the DOM directly to prevent duplicates
-  const injectedWrappers = new Map<string, Element>()
-
   function decorateMountedMessages() {
-    for (const { messageId, element } of ctx.dom.listMessageElements()) {
-      // Check both our Map and the live DOM bubble so virtualized replays never duplicate
-      if (injectedWrappers.has(messageId) || element.querySelector('.sms-msg-bar')) {
-        continue
-      }
+    // Deduplicate by messageId so if listMessageElements() returns both a header and body
+    // element for the same messageId, we only ever process each messageId once using findMessageElement()
+    const seenIds = new Set<string>()
 
-      const bar = ctx.dom.inject(
-        element,
-        `
-        <div class="sms-msg-bar" data-sms-id="${messageId}">
-        <button type="button" class="sms-msg-btn" data-sms-action="auto_detect" title="Summarize <song> tags if present, otherwise summarize message">
-        ✨ Summarize
-        </button>
-        <button type="button" class="sms-msg-btn" data-sms-action="song_only" title="Replace only <song>...</song> with a summary">
-        🎵 &lt;song&gt; Only
-        </button>
-        </div>
-        `,
-        'beforeend'
-      )
+    for (const { messageId } of ctx.dom.listMessageElements()) {
+      if (!messageId || seenIds.has(messageId)) continue
+        seenIds.add(messageId)
 
-      if (bar) {
-        injectedWrappers.set(messageId, bar)
-        bar.addEventListener('click', (e) => {
-          const btn = (e.target as HTMLElement).closest('[data-sms-action]') as HTMLElement | null
-          if (!btn) return
-            e.stopPropagation()
-            const mode = btn.getAttribute('data-sms-action') || 'auto_detect'
-            const resolvedId = ctx.dom.getMessageId(btn) || messageId
-            ctx.sendToBackend({
-              type: 'summarize_message',
-              chatId: getActiveChatId(),
-                              messageId: resolvedId,
-                              mode,
-                              connectionId: selectedConnectionId,
+        const bubble = ctx.dom.findMessageElement(messageId)
+        if (!bubble) continue
+
+          // Check if this message already has any .sms-msg-bar inside it
+          const existingBars = bubble.querySelectorAll('.sms-msg-bar')
+          if (existingBars.length > 0) {
+            // If an older injection left more than one bar, uninject the extras
+            for (let i = 0; i < existingBars.length - 1; i++) {
+              const extra = existingBars[i]
+              try {
+                ctx.dom.uninject(extra.parentElement || extra)
+              } catch {}
+              extra.remove()
+            }
+            continue
+          }
+
+          const bar = ctx.dom.inject(
+            bubble,
+            `
+            <div class="sms-msg-bar" data-sms-id="${messageId}">
+            <button type="button" class="sms-msg-btn" data-sms-action="auto_detect" title="Summarize <song> tags if present, otherwise summarize message">
+            ✨ Summarize
+            </button>
+            <button type="button" class="sms-msg-btn" data-sms-action="song_only" title="Replace only <song>...</song> with a summary">
+            🎵 &lt;song&gt; Only
+            </button>
+            </div>
+            `,
+            'beforeend'
+          )
+
+          if (bar) {
+            bar.addEventListener('click', (e) => {
+              const btn = (e.target as HTMLElement).closest('[data-sms-action]') as HTMLElement | null
+              if (!btn) return
+                e.stopPropagation()
+                const mode = btn.getAttribute('data-sms-action') || 'auto_detect'
+                const resolvedId = ctx.dom.getMessageId(btn) || messageId
+                ctx.sendToBackend({
+                  type: 'summarize_message',
+                  chatId: getActiveChatId(),
+                                  messageId: resolvedId,
+                                  mode,
+                                  connectionId: selectedConnectionId,
+                })
             })
-        })
-      }
+          }
     }
   }
 
   decorateMountedMessages()
-  // Periodic light check so newly scrolled-in virtualized messages also get buttons
   const decorateInterval = window.setInterval(decorateMountedMessages, 1000)
 
   const onContextMenu = async (event: MouseEvent) => {
@@ -309,7 +336,6 @@ export function setup(ctx: SpindleFrontendContext) {
 
   const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload: any) => {
     if (payload?.chatId) currentChatId = payload.chatId
-      injectedWrappers.clear()
       setTimeout(decorateMountedMessages, 150)
   })
 
