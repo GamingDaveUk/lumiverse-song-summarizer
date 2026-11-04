@@ -3,15 +3,27 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 interface SummarizerSettings {
   connectionId: string
   contextCount: number
+  maxTokens: number
   autoSongAfterMessages: number
   autoSongEnabled: boolean
+  songSystemPrompt: string
+  messageSystemPrompt: string
 }
+
+const DEFAULT_SONG_PROMPT =
+'You are a narrative summarizer for a roleplay chat. Summarize the song lyrics, theme, emotional tone, and any narrative progression taking place during the song. Aim for roughly 2 to 5 sentences (scaling naturally with the length and complexity of the song) and always finish your thoughts completely. Output ONLY the summary text.'
+
+const DEFAULT_MESSAGE_PROMPT =
+'You are a narrative summarizer for a roleplay chat. Using the preceding messages solely as context to understand references, summarize all key events, dialogue, and character actions in the Target Message. Aim for 1 to 2 concise paragraphs (scaling naturally with the length of the message so no important plot points are dropped) and always finish every sentence completely. If the Target Message includes a <song>, include a brief summary of the song performance as well. Output ONLY the summary.'
 
 const defaultSettings: SummarizerSettings = {
   connectionId: '',
   contextCount: 5,
+  maxTokens: 4096,
   autoSongAfterMessages: 5,
   autoSongEnabled: false,
+  songSystemPrompt: DEFAULT_SONG_PROMPT,
+  messageSystemPrompt: DEFAULT_MESSAGE_PROMPT,
 }
 
 const SUMMARY_MARKER = '[Song Summary:'
@@ -37,10 +49,6 @@ function notify(
   }
 }
 
-/**
- * Resolves the current chatId without requiring a reply first.
- * Checks: explicit payload -> cached chatId -> spindle.chats.getActive(userId) -> messageId search.
- */
 async function resolveChatId(
   explicitChatId?: string | null,
   messageId?: string | null,
@@ -58,7 +66,6 @@ async function resolveChatId(
   const chatsApi = (spindle as any).chats
   const chatMutationApi = (spindle as any).chat
 
-  // 1. Try getActive / getActiveChat / getCurrentChat on spindle.chats or spindle.chat
   for (const api of [chatsApi, chatMutationApi]) {
     if (!api) continue
       for (const fnName of ['getActive', 'getActiveChat', 'getActiveChatId', 'getCurrent']) {
@@ -84,7 +91,6 @@ async function resolveChatId(
       }
   }
 
-  // 2. Fallback: list recent chats for this user and find the one containing messageId (or most recent)
   if (chatsApi && typeof chatsApi.list === 'function') {
     try {
       const listRes = userId ? await chatsApi.list(userId) : await chatsApi.list()
@@ -117,9 +123,6 @@ async function resolveChatId(
   return null
 }
 
-/**
- * Fetches messages for a chat, threading userId for operator-scoped extensions.
- */
 async function getChatMessages(chatId: string, userId?: string): Promise<any[]> {
   const chatApi = spindle.chat as any
   if (userId) {
@@ -134,9 +137,6 @@ async function getChatMessages(chatId: string, userId?: string): Promise<any[]> 
   return await chatApi.getMessages(chatId)
 }
 
-/**
- * Updates a stored message, threading userId for operator-scoped extensions.
- */
 async function updateStoredMessage(
   chatId: string,
   messageId: string,
@@ -167,9 +167,6 @@ async function updateStoredMessage(
   throw lastErr || new Error('Failed to update message via spindle.chat')
 }
 
-/**
- * Fires LLM generation with userId passed for operator-scoped extensions.
- */
 async function runGeneration(
   systemPrompt: string,
   userPrompt: string,
@@ -184,11 +181,17 @@ async function runGeneration(
   const targetConn = connectionId ?? currentSettings.connectionId
   const genApi = spindle.generate as any
 
+  // If maxTokens > 0, pass it; if 0, let the provider use its own default ceiling
+  const parameters: Record<string, any> = { temperature: 0.3 }
+  if (currentSettings.maxTokens && currentSettings.maxTokens > 0) {
+    parameters.max_tokens = currentSettings.maxTokens
+  }
+
   if (targetConn && targetConn.trim() !== '') {
     const req: any = {
       messages,
       connection_id: targetConn,
-      parameters: { temperature: 0.3, max_tokens: 400 },
+      parameters,
       reasoning: { source: 'off' },
       ...(userId ? { userId, user_id: userId } : {}),
     }
@@ -202,7 +205,7 @@ async function runGeneration(
   } else {
     const req: any = {
       messages,
-      parameters: { temperature: 0.3, max_tokens: 400 },
+      parameters,
       reasoning: { source: 'off' },
       ...(userId ? { userId, user_id: userId } : {}),
     }
@@ -265,8 +268,7 @@ async function summarizeMessageById(
         continue
       }
 
-      const systemPrompt =
-      'You are a concise narrative summarizer for a roleplay chat. Summarize the song lyrics, theme, emotional tone, and any narrative progression taking place during the song in 2 to 3 sentences. Output ONLY the summary text.'
+      const systemPrompt = currentSettings.songSystemPrompt || DEFAULT_SONG_PROMPT
       const userPrompt = `### Recent Conversation Context:\n${contextText}\n\n### Full Message Context:\n${rawContent}\n\n### Song Content to Summarize:\n${innerSong}`
 
       const summary = await runGeneration(systemPrompt, userPrompt, connectionId, userId)
@@ -289,8 +291,7 @@ async function summarizeMessageById(
     return { updated: true, summary: updatedContent }
   }
 
-  const systemPrompt =
-  'You are a concise narrative summarizer for a roleplay chat. Using the preceding messages solely as context to understand references, summarize what happens in the Target Message clearly and concisely in 1 short paragraph. If the Target Message includes a <song>, include a brief summary of the song performance as well. Output ONLY the summary.'
+  const systemPrompt = currentSettings.messageSystemPrompt || DEFAULT_MESSAGE_PROMPT
   const userPrompt = `### Preceding Context (Do not summarize this):\n${contextText}\n\n### Target Message to Summarize:\n${rawContent}`
 
   const summary = await runGeneration(systemPrompt, userPrompt, connectionId, userId)
@@ -356,11 +357,17 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
   try {
     if (payload.type === 'update_settings') {
       currentSettings = { ...currentSettings, ...payload.settings }
-      notify('success', 'Summarizer settings updated.', userId)
+      if (!payload.silent) {
+        notify('success', 'Summarizer settings saved.', userId)
+      }
       return
     }
 
     if (payload.type === 'summarize_message') {
+      if (payload.settings) {
+        currentSettings = { ...currentSettings, ...payload.settings }
+      }
+
       const chatId = await resolveChatId(payload.chatId, payload.messageId, userId)
       if (!chatId) {
         notify('warning', 'Could not resolve active chat.', userId)
@@ -385,6 +392,10 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
     }
 
     if (payload.type === 'scan_all_past_songs') {
+      if (payload.settings) {
+        currentSettings = { ...currentSettings, ...payload.settings }
+      }
+
       const chatId = await resolveChatId(payload.chatId, payload.latestMessageId, userId)
       if (!chatId) {
         notify('warning', 'Could not resolve active chat.', userId)

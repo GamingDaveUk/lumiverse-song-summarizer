@@ -1,13 +1,35 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 
+const STORAGE_KEY = 'lumiverse_song_message_summarizer_v1'
+
+const DEFAULT_SONG_PROMPT =
+'You are a narrative summarizer for a roleplay chat. Summarize the song lyrics, theme, emotional tone, and any narrative progression taking place during the song. Aim for roughly 2 to 5 sentences (scaling naturally with the length and complexity of the song) and always finish your thoughts completely. Output ONLY the summary text.'
+
+const DEFAULT_MESSAGE_PROMPT =
+'You are a narrative summarizer for a roleplay chat. Using the preceding messages solely as context to understand references, summarize all key events, dialogue, and character actions in the Target Message. Aim for 1 to 2 concise paragraphs (scaling naturally with the length of the message so no important plot points are dropped) and always finish every sentence completely. If the Target Message includes a <song>, include a brief summary of the song performance as well. Output ONLY the summary.'
+
 export function setup(ctx: SpindleFrontendContext) {
-  let selectedConnectionId = ''
-  let contextCount = 5
-  let autoSongAfterMessages = 5
-  let autoSongEnabled = false
+  let settings = {
+    connectionId: '',
+    contextCount: 5,
+    maxTokens: 4096,
+    autoSongAfterMessages: 5,
+    autoSongEnabled: false,
+    songSystemPrompt: DEFAULT_SONG_PROMPT,
+    messageSystemPrompt: DEFAULT_MESSAGE_PROMPT,
+  }
+
+  // Load saved settings from localStorage
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      settings = { ...settings, ...JSON.parse(raw) }
+    }
+  } catch {}
+
   let currentChatId: string | null = null
 
-  // Retire any leftover DOM elements from earlier versions
+  // Clean up any leftover DOM elements from earlier reloads
   for (const stale of Array.from(document.querySelectorAll('.sms-msg-bar'))) {
     const wrapper = stale.parentElement || stale
     try {
@@ -36,13 +58,20 @@ export function setup(ctx: SpindleFrontendContext) {
     color: var(--lumiverse-text-muted);
     font-size: 12px;
   }
-  .sms-select, .sms-input, .sms-btn {
+  .sms-select, .sms-input, .sms-textarea, .sms-btn {
     padding: 7px 10px;
     border-radius: var(--lumiverse-radius);
     border: 1px solid var(--lumiverse-border);
     background: var(--lumiverse-fill);
     color: var(--lumiverse-text);
     font-size: 13px;
+    font-family: inherit;
+  }
+  .sms-textarea {
+    min-height: 90px;
+    resize: vertical;
+    line-height: 1.4;
+    font-size: 12px;
   }
   .sms-btn {
     cursor: pointer;
@@ -94,24 +123,27 @@ export function setup(ctx: SpindleFrontendContext) {
     return currentChatId || detectChatIdFromUrl()
   }
 
-  function syncSettingsToBackend() {
+  function saveAndSyncSettings(silent = false) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+    } catch {}
+
     ctx.sendToBackend({
       type: 'update_settings',
-      settings: {
-        connectionId: selectedConnectionId,
-        contextCount,
-        autoSongAfterMessages,
-        autoSongEnabled,
-      },
+      settings,
+      silent,
     })
   }
+
+  // Push stored settings to backend immediately on startup
+  saveAndSyncSettings(true)
 
   const tab = ctx.ui.registerDrawerTab({
     id: 'song-summarizer',
     title: 'Song & Message Summarizer',
     shortName: 'Summarize',
-    description: 'Configure connection profile and <song> / message summarization',
-    keywords: ['song', 'summarize', 'summary', 'lyrics', 'connection'],
+    description: 'Configure connection profile, prompts, max tokens, and <song> / message summarization',
+    keywords: ['song', 'summarize', 'summary', 'lyrics', 'connection', 'prompt'],
     headerTitle: 'Summarizer',
   })
 
@@ -133,7 +165,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const connOptions = profiles
     .map(
       (p) =>
-      `<option value="${p.id}" ${p.id === selectedConnectionId ? 'selected' : ''}>
+      `<option value="${p.id}" ${p.id === settings.connectionId ? 'selected' : ''}>
       ${p.name} (${p.provider} - ${p.model})${p.active ? ' ★' : ''}
       </option>`
     )
@@ -150,19 +182,38 @@ export function setup(ctx: SpindleFrontendContext) {
 
     <div class="sms-field">
     <label>Past Messages for Context</label>
-    <input type="number" class="sms-input" id="sms-context-count" min="0" max="30" value="${contextCount}" />
+    <input type="number" class="sms-input" id="sms-context-count" min="0" max="50" value="${settings.contextCount}" />
     </div>
 
     <div class="sms-field">
+    <label>Max Summary Tokens (0 = Provider Default / No Limit)</label>
+    <input type="number" class="sms-input" id="sms-max-tokens" min="0" max="32000" step="256" value="${settings.maxTokens}" />
+    </div>
+
+    <div class="sms-field">
+    <label>Full Message Summary System Prompt</label>
+    <textarea class="sms-textarea" id="sms-msg-prompt"></textarea>
+    </div>
+
+    <div class="sms-field">
+    <label>&lt;song&gt; Summary System Prompt</label>
+    <textarea class="sms-textarea" id="sms-song-prompt"></textarea>
+    </div>
+
+    <button type="button" class="sms-btn" id="sms-reset-prompts">
+    ↺ Reset Prompts to Default
+    </button>
+
+    <div class="sms-field">
     <label>
-    <input type="checkbox" id="sms-auto-toggle" ${autoSongEnabled ? 'checked' : ''} />
+    <input type="checkbox" id="sms-auto-toggle" ${settings.autoSongEnabled ? 'checked' : ''} />
     Auto-summarize &lt;song&gt; tags after N messages
     </label>
     </div>
 
     <div class="sms-field">
     <label>Messages to wait before auto-summarizing &lt;song&gt;</label>
-    <input type="number" class="sms-input" id="sms-auto-count" min="1" max="50" value="${autoSongAfterMessages}" />
+    <input type="number" class="sms-input" id="sms-auto-count" min="1" max="50" value="${settings.autoSongAfterMessages}" />
     </div>
 
     <button type="button" class="sms-btn" id="sms-scan-now">
@@ -182,50 +233,82 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const connSelect = wrapper.querySelector('#sms-conn-select') as HTMLSelectElement
     const ctxInput = wrapper.querySelector('#sms-context-count') as HTMLInputElement
+    const maxTokensInput = wrapper.querySelector('#sms-max-tokens') as HTMLInputElement
+    const msgPromptArea = wrapper.querySelector('#sms-msg-prompt') as HTMLTextAreaElement
+    const songPromptArea = wrapper.querySelector('#sms-song-prompt') as HTMLTextAreaElement
+    const resetPromptsBtn = wrapper.querySelector('#sms-reset-prompts') as HTMLButtonElement
     const autoToggle = wrapper.querySelector('#sms-auto-toggle') as HTMLInputElement
     const autoCountInput = wrapper.querySelector('#sms-auto-count') as HTMLInputElement
     const scanBtn = wrapper.querySelector('#sms-scan-now') as HTMLButtonElement
     const latestBtn = wrapper.querySelector('#sms-summarize-latest') as HTMLButtonElement
 
-    connSelect?.addEventListener('change', () => {
-      selectedConnectionId = connSelect.value
-      syncSettingsToBackend()
-    })
+    if (msgPromptArea) msgPromptArea.value = settings.messageSystemPrompt
+      if (songPromptArea) songPromptArea.value = settings.songSystemPrompt
 
-    ctxInput?.addEventListener('change', () => {
-      contextCount = Math.max(0, parseInt(ctxInput.value || '5', 10))
-      syncSettingsToBackend()
-    })
-
-    autoToggle?.addEventListener('change', () => {
-      autoSongEnabled = autoToggle.checked
-      syncSettingsToBackend()
-    })
-
-    autoCountInput?.addEventListener('change', () => {
-      autoSongAfterMessages = Math.max(1, parseInt(autoCountInput.value || '5', 10))
-      syncSettingsToBackend()
-    })
-
-    scanBtn?.addEventListener('click', () => {
-      ctx.sendToBackend({
-        type: 'scan_all_past_songs',
-        chatId: getActiveChatId(),
-                        latestMessageId: ctx.messages.getLatestMessageId(),
-      })
-    })
-
-    latestBtn?.addEventListener('click', () => {
-      const latestId = ctx.messages.getLatestMessageId()
-      if (!latestId) return
-        ctx.sendToBackend({
-          type: 'summarize_message',
-          chatId: getActiveChatId(),
-                          messageId: latestId,
-                          mode: 'auto_detect',
-                          connectionId: selectedConnectionId,
+        connSelect?.addEventListener('change', () => {
+          settings.connectionId = connSelect.value
+          saveAndSyncSettings()
         })
-    })
+
+        ctxInput?.addEventListener('change', () => {
+          settings.contextCount = Math.max(0, parseInt(ctxInput.value || '5', 10))
+          saveAndSyncSettings()
+        })
+
+        maxTokensInput?.addEventListener('change', () => {
+          settings.maxTokens = Math.max(0, parseInt(maxTokensInput.value || '4096', 10))
+          saveAndSyncSettings()
+        })
+
+        msgPromptArea?.addEventListener('change', () => {
+          settings.messageSystemPrompt = msgPromptArea.value.trim() || DEFAULT_MESSAGE_PROMPT
+          saveAndSyncSettings()
+        })
+
+        songPromptArea?.addEventListener('change', () => {
+          settings.songSystemPrompt = songPromptArea.value.trim() || DEFAULT_SONG_PROMPT
+          saveAndSyncSettings()
+        })
+
+        resetPromptsBtn?.addEventListener('click', () => {
+          settings.messageSystemPrompt = DEFAULT_MESSAGE_PROMPT
+          settings.songSystemPrompt = DEFAULT_SONG_PROMPT
+          if (msgPromptArea) msgPromptArea.value = DEFAULT_MESSAGE_PROMPT
+            if (songPromptArea) songPromptArea.value = DEFAULT_SONG_PROMPT
+              saveAndSyncSettings()
+        })
+
+        autoToggle?.addEventListener('change', () => {
+          settings.autoSongEnabled = autoToggle.checked
+          saveAndSyncSettings()
+        })
+
+        autoCountInput?.addEventListener('change', () => {
+          settings.autoSongAfterMessages = Math.max(1, parseInt(autoCountInput.value || '5', 10))
+          saveAndSyncSettings()
+        })
+
+        scanBtn?.addEventListener('click', () => {
+          ctx.sendToBackend({
+            type: 'scan_all_past_songs',
+            chatId: getActiveChatId(),
+                            latestMessageId: ctx.messages.getLatestMessageId(),
+                            settings,
+          })
+        })
+
+        latestBtn?.addEventListener('click', () => {
+          const latestId = ctx.messages.getLatestMessageId()
+          if (!latestId) return
+            ctx.sendToBackend({
+              type: 'summarize_message',
+              chatId: getActiveChatId(),
+                              messageId: latestId,
+                              mode: 'auto_detect',
+                              connectionId: settings.connectionId,
+                              settings,
+            })
+        })
   }
 
   void renderDrawer()
@@ -237,8 +320,6 @@ export function setup(ctx: SpindleFrontendContext) {
   })
 
   function decorateMountedMessages() {
-    // Deduplicate by messageId so if listMessageElements() returns both a header and body
-    // element for the same messageId, we only ever process each messageId once using findMessageElement()
     const seenIds = new Set<string>()
 
     for (const { messageId } of ctx.dom.listMessageElements()) {
@@ -248,10 +329,8 @@ export function setup(ctx: SpindleFrontendContext) {
         const bubble = ctx.dom.findMessageElement(messageId)
         if (!bubble) continue
 
-          // Check if this message already has any .sms-msg-bar inside it
           const existingBars = bubble.querySelectorAll('.sms-msg-bar')
           if (existingBars.length > 0) {
-            // If an older injection left more than one bar, uninject the extras
             for (let i = 0; i < existingBars.length - 1; i++) {
               const extra = existingBars[i]
               try {
@@ -289,7 +368,8 @@ export function setup(ctx: SpindleFrontendContext) {
                   chatId: getActiveChatId(),
                                   messageId: resolvedId,
                                   mode,
-                                  connectionId: selectedConnectionId,
+                                  connectionId: settings.connectionId,
+                                  settings,
                 })
             })
           }
@@ -323,7 +403,8 @@ export function setup(ctx: SpindleFrontendContext) {
               chatId: getActiveChatId(),
                               messageId,
                               mode: selectedKey,
-                              connectionId: selectedConnectionId,
+                              connectionId: settings.connectionId,
+                              settings,
             })
           }
   }
